@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+
+# 环境
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 数据缓存（每次可重新拉取）
+data_cache/*.parquet
+data_cache/crypto/**/*.parquet
+data_cache/crypto/**/*.source.json
+
+# 日志
+logs/*.log
+
+# 回测结果
+results/*.png
+results/*.csv
+!results/.gitkeep
+results/validation.json
+results/experiments/
+
+# Local datasets, logs, and test scratch directories
+data_cache/
+logs/
+.tmp-tests/
+tests/.codex-temp/
+tests/tmp*/
+**/__pycache__/
+
+# Keep only the frozen evidence used by the read-only workbench
+results/*
+!results/.gitkeep
+!results/crypto/
+results/crypto/*
+!results/crypto/ai/
+!results/crypto/btc-carry-v3-20261010/
+!results/crypto/campaign-registry/
+!results/crypto/onchain/
+!results/crypto/ai/**
+!results/crypto/btc-carry-v3-20261010/**
+!results/crypto/campaign-registry/**
+!results/crypto/onchain/**
+
+# Keep locally generated research results out of the public repository
+results/*
+!results/.gitkeep

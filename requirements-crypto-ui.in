@@ -1,0 +1,2 @@
+-r requirements-crypto.lock
+streamlit==1.65.0

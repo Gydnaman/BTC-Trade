@@ -1,0 +1,29 @@
+{
+  "config": {
+    "campaign": {"initial_equity": "1000"},
+    "costs": {
+      "spot_fee_bps": "10",
+      "perp_fee_bps": "5",
+      "slippage_bps": "0"
+    }
+  },
+  "events": [
+    {"kind": "spot_fill", "event_time": "2025-01-01T00:00:00Z", "sequence": 1,
+     "payload": {"group_id": "carry-1", "side": "buy", "quantity": "1", "price": "100"}},
+    {"kind": "collateral_transfer", "event_time": "2025-01-01T00:00:00Z", "sequence": 2,
+     "payload": {"group_id": "carry-1", "amount": "101"}},
+    {"kind": "perp_fill", "event_time": "2025-01-01T00:00:00Z", "sequence": 3,
+     "payload": {"group_id": "carry-1", "side": "sell", "quantity": "1", "price": "101"}},
+    {"kind": "funding", "event_time": "2025-01-01T08:00:00Z", "sequence": 9,
+     "payload": {"rate": "0.001", "mark_price": "113",
+                 "mark_price_source": "funding_endpoint",
+                 "mark_price_is_proxy": false,
+                 "mark_price_source_time": null}},
+    {"kind": "spot_fill", "event_time": "2025-01-01T10:00:00Z", "sequence": 1,
+     "payload": {"group_id": "carry-1", "side": "sell", "quantity": "1", "price": "110"}},
+    {"kind": "perp_fill", "event_time": "2025-01-01T10:00:00Z", "sequence": 2,
+     "payload": {"group_id": "carry-1", "side": "buy", "quantity": "1", "price": "113"}},
+    {"kind": "collateral_transfer", "event_time": "2025-01-01T10:00:00Z", "sequence": 3,
+     "payload": {"group_id": "carry-1", "amount": "-89.113"}}
+  ]
+}
