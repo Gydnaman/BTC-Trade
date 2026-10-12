@@ -43,8 +43,8 @@ class CryptoUiAppTests(unittest.TestCase):
 
     def test_research_dashboard_explains_filters_and_risk_scenario_names(self):
         source = APP_SOURCE.read_text(encoding="utf-8")
-        self.assertIn('"策略"', source)
-        self.assertIn('"研究阶段"', source)
+        self.assertIn('"历史回放策略"', source)
+        self.assertIn('"历史回放阶段（已保存结果）"', source)
         self.assertIn('"选定区间收益"', source)
         self.assertIn("SCENARIO_LABELS", source)
         self.assertIn("风险情景释义", source)

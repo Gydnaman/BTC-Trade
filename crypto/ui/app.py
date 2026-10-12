@@ -1,4 +1,4 @@
-"""Read-only Streamlit workbench for the frozen BTC carry campaign."""
+"""Interactive BTC Carry experiments plus read-only research evidence."""
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -22,6 +22,7 @@ from crypto.ui.glossary import (
 )
 from crypto.ui.integrations import build_integrated_status
 from crypto.ui.view_model import build_dashboard_model
+from crypto.ui.playground_tab import render_playground_tab
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -69,20 +70,20 @@ def _render_research_tab(campaign_dir, catalog, st, alt, pd) -> None:
     strategy_options = list(dict.fromkeys(row["strategy"] for row in trials))
     default_strategy = (candidate_strategy if candidate_strategy in strategy_options
                         else strategy_options[0])
-    selected_strategy = st.sidebar.selectbox(
-        "策略", strategy_options,
+    selected_strategy = st.selectbox(
+        "历史回放策略", strategy_options,
         index=strategy_options.index(default_strategy),
         format_func=lambda strategy: STRATEGY_LABELS.get(strategy, strategy),
         key="crypto_strategy",
     )
-    st.sidebar.caption(STRATEGY_DESCRIPTIONS.get(selected_strategy, ""))
+    st.caption(STRATEGY_DESCRIPTIONS.get(selected_strategy, ""))
     strategy_trials = [row for row in trials
                        if row["strategy"] == selected_strategy]
     stage_options = list(dict.fromkeys(row["stage"] for row in strategy_trials))
     default_stage = ("holdout" if "holdout" in stage_options else
                      "validation" if "validation" in stage_options else stage_options[0])
-    selected_stage = st.sidebar.selectbox(
-        "研究阶段", stage_options,
+    selected_stage = st.selectbox(
+        "历史回放阶段（已保存结果）", stage_options,
         index=stage_options.index(default_stage),
         format_func=lambda stage: STAGE_LABELS.get(stage, stage),
         key=f"crypto_stage_{selected_strategy}",
@@ -94,8 +95,8 @@ def _render_research_tab(campaign_dir, catalog, st, alt, pd) -> None:
     end_default = date.fromisoformat(selected["end_time"][:10])
     if selected["end_time"][11:19] == "00:00:00":
         end_default -= timedelta(days=1)
-    selected_dates = st.sidebar.date_input(
-        "查看日期范围（UTC，含首尾日）",
+    selected_dates = st.date_input(
+        "历史回放日期范围（UTC，含首尾日）",
         value=(start_default, end_default),
         min_value=start_default,
         max_value=end_default,
@@ -347,7 +348,7 @@ def _render_chain_tab(st, pd, integrated: dict) -> None:
 
 
 def render_app(campaign_dir: str | Path = DEFAULT_CAMPAIGN_DIR) -> None:
-    """Render an integrated read-only view; it never runs research or contacts a provider/node."""
+    """Render a local strategy playground and any available frozen evidence."""
     import altair as alt
     import pandas as pd
     import streamlit as st
@@ -355,52 +356,83 @@ def render_app(campaign_dir: str | Path = DEFAULT_CAMPAIGN_DIR) -> None:
     st.set_page_config(page_title="BTC Carry 研究工作台", page_icon="₿",
                        layout="wide")
     st.title("BTC Carry 研究工作台")
-    st.caption("冻结 campaign 的只读可视化 · 本地运行 · UTC 时间")
+    st.caption("策略实验只运行历史 development 数据；其余页面读取本地保存的研究证据。")
 
+    catalog = None
+    catalog_error = None
     try:
         catalog = load_campaign_catalog(str(campaign_dir))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        st.error(f"研究 artifact 校验失败：{exc}")
-        st.info("请检查 campaign trial、margin audit、campaign-feasibility 和 ledger 文件。")
-        return
-    trials = catalog["trials"]
-    if not trials:
-        st.info("尚无已完成的研究结果。")
-        return
+        catalog_error = str(exc)
+    trials = catalog.get("trials", []) if catalog else []
+
+    integrated = None
+    integrated_error = None
     try:
         integrated = build_integrated_status(PROJECT_ROOT)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        integrated = None
-        st.error(f"AI / 链上证据状态不可用：{exc}")
+        integrated_error = str(exc)
 
-    holdout = next((row for row in trials if row["stage"] == "holdout" and
-                    row["strategy"] == catalog["campaign_feasibility"].get("candidate_strategy")), None)
     status_columns = st.columns(3)
+    campaign = (catalog.get("campaign_feasibility") or {}) if catalog else {}
+    candidate = campaign.get("candidate_strategy")
+    holdout = next((row for row in trials
+                    if row["stage"] == "holdout" and row["strategy"] == candidate), None)
     if holdout:
         status_columns[0].metric(
             "一次性 holdout", _format_percent(holdout["total_return"]),
-            f"{holdout['daily_return_count']} 日 · 已消费")
+            f"{holdout['daily_return_count']} 日 · 已消费",
+        )
     else:
-        status_columns[0].metric("一次性 holdout", "无可用记录")
+        status_columns[0].metric(
+            "历史 holdout", "尚无本地记录" if not trials else "无可用记录"
+        )
+
     if integrated:
         ai_status = integrated["ai"]["metadata"]["status"]
         ai_label = "事实回退（离线）" if ai_status == "fallback" else "模型解读"
-        chain_label = "未核验 · 合成样例" if integrated["onchain"]["is_synthetic"] else (
-            "RPC 已核验" if integrated["onchain"]["is_rpc_verified"] else "未核验")
+        chain_label = (
+            "未核验 · 合成样例" if integrated["onchain"]["is_synthetic"]
+            else "RPC 已核验" if integrated["onchain"]["is_rpc_verified"]
+            else "未核验"
+        )
     else:
-        ai_label, chain_label = "状态不可用", "状态不可用"
-    status_columns[1].metric("AI 报告", ai_label, "固定事实先于模型文本")
-    status_columns[2].metric("链上状态", chain_label, "合成样例不会当作实链证据")
+        ai_label = "本地报告不可用"
+        chain_label = "本地示例不可用"
+    status_columns[1].metric("AI 报告", ai_label, "只展示已保存报告")
+    status_columns[2].metric("链上状态", chain_label, "示例不等于真实链上验证")
 
-    research_tab, ai_tab, chain_tab = st.tabs(["策略回测", "AI 研究报告", "链上验证"])
+    playground_tab, research_tab, ai_tab, chain_tab = st.tabs(
+        ["策略实验", "历史回放", "AI 研究报告", "链上验证"]
+    )
+    with playground_tab:
+        render_playground_tab(st, alt, pd, project_root=PROJECT_ROOT)
     with research_tab:
-        _render_research_tab(campaign_dir, catalog, st, alt, pd)
+        if catalog and trials:
+            _render_research_tab(campaign_dir, catalog, st, alt, pd)
+        elif catalog_error:
+            st.info(
+                "尚无可读取的冻结 campaign artifact。策略实验页仍可使用；"
+                f"历史回放暂不可用：{catalog_error}"
+            )
+        else:
+            st.info("本机还没有已完成的冻结研究结果；可先运行策略实验。")
     with ai_tab:
         if integrated:
             _render_ai_tab(st, integrated)
+        else:
+            st.info(
+                "未找到本机保存的 AI 报告 artifact。此页面不会自动调用 AI。"
+                + (f" 详情：{integrated_error}" if integrated_error else "")
+            )
     with chain_tab:
         if integrated:
             _render_chain_tab(st, pd, integrated)
+        else:
+            st.info(
+                "未找到本机保存的链上事件演示 artifact；本页面不会自动连接 RPC。"
+                + (f" 详情：{integrated_error}" if integrated_error else "")
+            )
 
 
 if __name__ == "__main__":

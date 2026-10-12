@@ -569,10 +569,14 @@ def _risk_scenarios(groups: list[dict], costs: dict,
 
 
 def _execute_trial(config: dict, snapshot: dict, split: dict, stage: str,
-                   strategy: str, parameters: dict) -> dict:
+                   strategy: str, parameters: dict,
+                   *, prepared_strategy: tuple[list[dict], list[dict]] | None = None) -> dict:
     tables = snapshot["tables"]
-    events, groups = _build_strategy_events(config, tables, split[stage],
-                                            strategy, parameters)
+    if prepared_strategy is None:
+        events, groups = _build_strategy_events(config, tables, split[stage],
+                                                strategy, parameters)
+    else:
+        events, groups = prepared_strategy
     cfg = deepcopy(config)
     cfg["data"]["known_gaps"] = config["data"].get("known_gaps", [])
     first = replay_events(events, cfg)

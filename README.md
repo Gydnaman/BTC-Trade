@@ -1,388 +1,215 @@
-# 量化交易系统 (Quant Trading Framework)
-
-> 新增开发入口：`python -B -m harness.validate`。
-> Skills、受约束实验命令和当前实现边界见 [本地 Harness 指南](docs/HARNESS.md)。
-> 下文原始路线图中的“风控下单前强制检查”等描述尚未全部实现，以该指南为准。
-
-> 面向 CFA/FRM 持证人的量化交易系统骨架，覆盖**研究 → 回测 → 风控 → 实盘**完整工作流。
->
-> **设计哲学**：开箱即用的模拟数据测试，可插拔的外部 API 接入。前期无需任何配置即可验证策略逻辑；接入真实数据与实盘交易时，只需编辑 `.env` 并继承基类实现接口。
+# BTC-Trade：从量化回测到 BTC Carry 研究
 
----
+这是一个学习、研究和演示项目。读完本 README，你应该能说清楚它由哪些部分组成、如何本地跑起 BTC 研究工作台、怎样创建一条受支持的回测，以及该如何解读结果和限制。
 
-## 目录
-- [快速开始](#快速开始)
-- [核心设计：模拟数据优先，API 可插拔](#核心设计模拟数据优先api-可插拔)
-- [三阶段工作流](#三阶段工作流)
-- [项目结构](#项目结构)
-- [配置系统](#配置系统)
-- [接入外部数据源](#接入外部数据源)
-- [接入实盘券商](#接入实盘券商)
-- [添加自定义策略](#添加自定义策略)
-- [绩效指标](#绩效指标)
-- [技术栈](#技术栈)
-- [开发路线图](#开发路线图)
-- [注意事项与风险声明](#注意事项与风险声明)
-
----
-
-## 快速开始
-
-```bash
-# 1. 安装依赖（核心库，不含可选数据源/券商SDK）
-pip install -r requirements.txt
-
-# 2. 直接运行（内置模拟数据，无需任何API配置）
-python main.py
-```
-
-运行后将依次演示：单标的双均线策略、多标的动量轮动、布林带均值回归、模拟Broker下单。结果图表自动保存到 `results/`。
-
-## 加密资产研究原型
-
-加密研究使用独立 Python 3.12 环境和配置，不接入旧 `main.py` 的模拟数据回退，也不读取交易账户凭证。
-
-```powershell
-# 在项目目录中执行
-.venv\Scripts\python.exe -m crypto.cli --config crypto/config.example.json --collect
-```
-
-此命令只读取 Binance 公共行情接口，将 BTC/USDT 现货、线性永续、永续标记价格小时 K 线与离散资金费率保存到配置目录。随后生成带 SHA-256 的 `manifest.json`。未说明的数据缺口会导致审计失败；唯一允许豁免的是配置逐字段匹配官方公告的 Binance 现货停机小时，且不补造价格柱。现货与双腿账本都会在该固定时段拒绝现货成交。早期资金费空结算价用带来源标记的同小时 mark 开盘代理，manifest 记录代理数量。合成行情不会用于正式研究。交易手续费配置只是可见的研究假设，交易所规则元数据是抓取当天的快照。
-
-`crypto.spot.run_spot` 提供独立现货现金账本，`crypto.ledger.replay_events` 提供 Decimal 双腿事件账本；详见[数据边界](docs/crypto/DATA.md)、[双腿账本](docs/crypto/LEDGER.md)和[现货对照状态](docs/crypto/SPOT_COMPARISON.md)。
-
-依赖清单：`requirements-crypto.in` 是安装约束，`requirements-crypto.lock` 是本机 Python 3.12 完整解析结果。输出 Parquet 与来源记录保存在 `data_cache/crypto/`。
-
----
-
-## 核心设计：模拟数据优先，API 可插拔
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    DataLoader.get_daily()                    │
-│                      (统一数据接口)                            │
-├──────────────┬────────────────┬──────────────────────────────┤
-│  本地缓存命中? │  是 → 返回缓存  │                              │
-│      ↓ 否     │                │  否 → 回退模拟数据(GBM)        │
-│  .env已配置?  │── 是 → 调用API ─┤  (保证测试环境零依赖)          │
-└──────────────┴────────────────┴──────────────────────────────┘
-```
-
-| 阶段 | 数据来源 | 配置要求 | 目的 |
-|------|---------|---------|------|
-| **开发调试** | 内置模拟数据（几何布朗运动） | 无 | 验证策略/回测/报告逻辑 |
-| **历史回测** | 真实行情 API | `.env` 填 token | 真实数据回测、参数寻优 |
-| **实盘监控** | 实时行情 + 券商 API | `.env` + 券商SDK | 实盘信号生成与执行 |
-
----
-
-## 三阶段工作流
-
-```
-研究阶段                    验证阶段                    实盘阶段
-─────────                  ─────────                  ─────────
-模拟数据测试  ──→  接入真实数据回测  ──→  模拟盘验证  ──→  实盘交易
-  (阶段一)           (阶段二)            (阶段二.5)        (阶段三)
-   零配置            编辑 .env          SimulatedBroker   BaseBroker子类
-```
-
-### 阶段一：开发调试（当前默认）
-无需任何配置。`main.py` 的 `generate_sample_data()` 生成 GBM 模拟行情，验证策略信号生成、回测引擎、绩效报告全链路。
-
-### 阶段二：历史回测
-```bash
-cp .env.example .env          # 复制配置模板
-# 编辑 .env，填入数据源 token（详见下方"接入外部数据源"）
-pip install akshare           # 或 tushare / yfinance
-python main.py                # 自动启用真实数据
-```
-
-### 阶段三：实盘交易
-```bash
-# 编辑 .env，填入券商 API 配置（详见 docs/BROKER_INTEGRATION.md）
-# 实现 BaseBroker 子类对接券商
-```
-
----
-
-## 项目结构
-
-```
-quant_trading/
-├── main.py                  # 主入口，运行演示工作流
-├── requirements.txt         # Python依赖（核心+可选分组）
-├── .env.example             # API密钥与连接配置模板
-│
-├── config/                  # 配置层
-│   └── settings.py          # 全局参数（环境变量注入，杜绝硬编码）
-│
-├── data/                    # 数据层
-│   ├── data_loader.py       # 多源数据获取（统一接口，API可插拔）
-│   └── data_store.py        # 本地缓存（Parquet列式存储）
-│
-├── indicators/                  # 信号层
-│   └── indicators.py        # 技术指标库（SMA/EMA/RSI/MACD/布林带/ATR）
-│
-├── strategy/                # 策略层
-│   ├── base.py              # 策略抽象基类（统一仓位信号接口）
-│   ├── ma_cross.py          # 双均线交叉策略
-│   ├── momentum.py          # 多标的动量轮动策略
-│   └── bollinger.py         # 布林带均值回归策略
-│
-├── backtest/                # 回测层
-│   └── backtester.py        # 向量化回测引擎（含交易成本模拟，防前视偏差）
-│
-├── risk/                    # 风控层
-│   └── risk_manager.py      # 仓位限制/止损/回撤熔断/Kelly公式
-│
-├── execution/               # 执行层
-│   └── broker.py            # BaseBroker抽象 + SimulatedBroker实现
-│
-├── report/                  # 报告层
-│   └── plotting.py          # 净值曲线/回撤图/绩效表
-│
-├── docs/                    # 专业文档
-│   ├── DATA_SOURCES.md      # 数据源接入详细指南
-│   └── BROKER_INTEGRATION.md# 实盘券商对接详细指南
-│
-├── utils/                   # 工具层
-│   └── logger.py            # 统一日志（文件+控制台）
-│
-├── data_cache/              # 数据缓存（自动生成）
-├── logs/                    # 日志文件（自动生成）
-└── results/                 # 回测结果图表（自动生成）
-```
-
-### 架构数据流
-```
-数据获取 → 信号生成 → 回测验证 → 风控检查 → 实盘执行
-   ↑                                              ↓
-   └──────────── 监控迭代 ←───────────────────────┘
-```
-
-### 各层职责
-
-| 层 | 职责 | 关键类 | 接口约定 |
-|----|------|--------|---------|
-| **config** | 集中管理参数，环境变量注入 | `BacktestConfig`, `RiskConfig`, `BrokerConfig` | `.env` > 默认值 |
-| **data** | 多源获取+本地缓存，统一列名 | `DataLoader`, `DataStore` | `get_daily()` 返回标准OHLCV |
-| **signal** | 纯函数技术指标，可复用 | `SMA()`, `RSI()`, `MACD()` | Series进Series出 |
-| **strategy** | 策略逻辑，统一仓位信号 | `BaseStrategy`, `MACrossStrategy` | `generate_signals()` 返回权重[-1,1] |
-| **backtest** | 向量化回测，含佣金/滑点/印花税 | `Backtester`, `BacktestResult` | T日信号→T+1持仓（防前视偏差） |
-| **risk** | 仓位管理/止损/回撤熔断 | `RiskManager` | 下单前强制检查 |
-| **execution** | 模拟撮合，实盘对接券商API | `SimulatedBroker`, `BaseBroker` | 4方法接口契约 |
-| **report** | 净值曲线/回撤图/绩效指标 | `plot_equity_curve()` | 图表存 `results/` |
-
----
-
-## 配置系统
-
-所有参数通过 `config/settings.py` 集中管理，遵循**配置优先级**：
-
-```
-环境变量 > .env 文件 > dataclass 默认值
-```
-
-### 配置分组
-
-| 配置类 | 管理内容 | 关键参数 |
-|--------|---------|---------|
-| `DataSourceConfig` | 数据源选择与token | `cn_source`, `tushare_token`, `request_delay` |
-| `BacktestConfig` | 回测参数 | `initial_capital`, `commission_rate`, `slippage`, `stamp_duty` |
-| `RiskConfig` | 风控阈值 | `max_position_pct`, `stop_loss_pct`, `max_drawdown_pct` |
-| `BrokerConfig` | 实盘券商连接 | `ib_port`, `qmt_path`, `ccxt_exchange` |
-
-### 前期测试（零配置）
-
-无需 `.env` 文件。系统检测到数据源不可用时，自动回退到模拟数据：
-
-```python
-# main.py 中的容错逻辑
-try:
-    data = loader.get_daily(symbol, market="cn")
-    if data.empty:
-        raise Exception("数据为空")
-except Exception:
-    data = generate_sample_data()["STOCK_A"]  # 回退模拟数据
-```
-
-### 接入真实数据（编辑 .env）
-
-```bash
-cp .env.example .env
-```
-
-`.env` 完整字段说明见文件内注释，涵盖：
-- **数据源**：Tushare / Alpha Vantage / Polygon / Wind / Binance
-- **实盘券商**：QMT / IBKR / CCXT
-- **运行环境**：数据源优先级、限流、无风险利率、日志级别
-
----
-
-## 接入外部数据源
-
-> 完整指南见 [docs/DATA_SOURCES.md](./docs/DATA_SOURCES.md)
-
-### 数据源对比
-
-| 数据源 | 市场 | 费用 | 是否需token | 推荐场景 |
-|--------|------|------|------------|---------|
-| **AKShare** | A股 | 免费 | 否 | 原型开发、日线回测 |
-| **Tushare** | A股 | 免费+积分 | 是 | 因子研究、财务数据 |
-| **Baostock** | A股 | 免费 | 否 | 长历史回测（1990起） |
-| **yfinance** | 美股 | 免费 | 否 | 美股/ETF日线 |
-| **Polygon.io** | 美股/期权 | 付费(免费限频) | 是 | 期权链、分钟级 |
-| **Wind/Choice** | 全市场 | 付费(机构) | 客户端授权 | 机构实盘 |
-| **CCXT** | 加密 | 免费 | 否(行情)/是(交易) | 加密货币 |
-
-### 快速接入示例（AKShare，A股）
-
-```bash
-pip install akshare
-# 无需 .env 配置，DataLoader 默认调用
-```
-
-```python
-from data.data_loader import DataLoader
-df = DataLoader().get_daily("000001.SZ", start="2024-01-01", market="cn")
-```
-
-### 快速接入示例（Tushare，A股）
-
-```bash
-pip install tushare
-```
-
-```env
-# .env
-TUSHARE_TOKEN=你的token
-DATA_CN_FALLBACK=tushare,akshare
-```
-
-### 数据契约
-
-所有数据源经 `DataLoader._standardize()` 统一为：
-```
-索引:  DatetimeIndex | 列: open,high,low,close,volume | 类型: float64 | 升序去重
-```
-
----
-
-## 接入实盘券商
-
-> 完整指南见 [docs/BROKER_INTEGRATION.md](./docs/BROKER_INTEGRATION.md)
-
-### 实盘前置条件
-```
-[ ] 策略已通过至少 1 年样本外回测
-[ ] 模拟盘（SimulatedBroker）至少 1 个月验证
-[ ] 实盘账户已开通程序化交易权限
-[ ] API密钥已配置最小权限（交易+查询，禁止出金）
-[ ] 已设置风控熔断 + 应急平仓方案
-```
-
-### Broker 接口契约
-
-继承 `BaseBroker`，实现 4 个方法即可接入任意券商：
-
-```python
-from execution.broker import BaseBroker, Order
-
-class MyBroker(BaseBroker):
-    def place_order(self, order: Order) -> str: ...      # 下单 → 订单ID
-    def cancel_order(self, order_id: str) -> bool: ...   # 撤单
-    def get_position(self, symbol: str) -> Position: ...  # 查持仓
-    def get_account_value(self) -> float: ...            # 查账户净值
-```
-
-### 支持的券商
-
-| 券商 | 市场 | 配置项 | 文档章节 |
-|------|------|--------|---------|
-| **QMT** | A股 | `QMT_PATH`, `QMT_ACCOUNT_ID` | [BROKER_INTEGRATION §4](./docs/BROKER_INTEGRATION.md#4-a股实盘qmt) |
-| **IBKR** | 全球 | `IB_HOST`, `IB_PORT`(7497模拟/7496实盘) | [BROKER_INTEGRATION §5](./docs/BROKER_INTEGRATION.md#5-全球实盘盈透证券-ibkr) |
-| **CCXT** | 加密 | `CCXT_EXCHANGE`, `CCXT_API_KEY` | [BROKER_INTEGRATION §6](./docs/BROKER_INTEGRATION.md#6-加密货币ccxt) |
-
-> ⚠️ IBKR 强烈建议先用 `IB_PORT=7497` 连接 paper trading，至少运行 2 周后再切实盘。
-
----
-
-## 添加自定义策略
-
-继承 `BaseStrategy`，实现 `generate_signals()` 返回目标仓位权重：
-
-```python
-from strategy.base import BaseStrategy
-from indicators.indicators import RSI
-
-class MyRSIStrategy(BaseStrategy):
-    def __init__(self, period=14, oversold=30, overbought=70):
-        super().__init__(name="RSI", period=period,
-                         oversold=oversold, overbought=overbought)
-
-    def generate_signals(self, df) -> pd.DataFrame:
-        close = df["close"]
-        rsi = RSI(close, self.params["period"])
-
-        weight = pd.Series(0.0, index=close.index)
-        weight[rsi < self.params["oversold"]] = 1.0    # 超卖买入
-        weight[rsi > self.params["overbought"]] = 0.0  # 超买卖出
-        weight = weight.replace(0.0, pd.NA).ffill().fillna(0.0)
-
-        return weight.to_frame(name="weight")
-```
-
-**仓位权重约定**：`1.0`=满仓做多，`0.0`=空仓，`-1.0`=满仓做空
-
----
-
-## 绩效指标
-
-| 指标 | 含义 | 参考标准 |
-|------|------|---------|
-| 年化收益率 | 年化后的复合收益 | >15% 优秀 |
-| 夏普比率 | 单位风险超额收益 | >1.0 合格, >2.0 优秀 |
-| 最大回撤 | 峰值到谷底最大跌幅 | <20% 为佳 |
-| Calmar比率 | 年化收益/最大回撤 | >1.0 良好 |
-| 胜率 | 盈利交易日占比 | 因策略而异 |
-| 盈亏比 | 平均盈利/平均亏损 | >1.5 为佳 |
-
-> 回测引擎默认 **T日信号 → T+1日持仓**，避免前视偏差。交易成本含佣金（万三）、滑点（千一）、印花税（千一，卖出单边）。
-
----
-
-## 技术栈
-
-- **语言**: Python 3.10+
-- **核心库**: pandas, numpy, scipy, matplotlib
-- **存储**: Parquet (pyarrow)
-- **数据源**: AKShare(A股), yfinance(美股), Tushare(A股), Polygon(美股/期权), Wind/Choice(机构)
-- **回测**: 内置向量化引擎（可替换为 VectorBT/Backtrader）
-- **实盘**: QMT(A股), IB(全球), CCXT(加密货币)
-
----
-
-## 开发路线图
-
-- [x] 项目骨架 + 3个示例策略
-- [x] 向量化回测引擎 + 交易成本模拟
-- [x] 模拟Broker + 风控模块
-- [x] **配置系统环境变量注入 + API可插拔文档**
-- [ ] 参数优化模块（网格搜索/Walk-forward）
-- [ ] 实盘Broker对接（QMT/IB）完整实现
-- [ ] 实时监控Dashboard（Streamlit）
-- [ ] 机器学习因子挖掘（LightGBM）
-- [ ] 期权波动率套利策略（利用BSM/IV分析能力）
-
----
-
-## 注意事项与风险声明
-
-### 工程规范
-1. **回测≠实盘**：回测结果好不代表实盘能赚钱，务必先模拟盘验证
-2. **防范过拟合**：使用样本外测试、Walk-forward分析
-3. **密钥安全**：API Key 放 `.env`（已 gitignore），生产环境用密钥管理服务
-4. **数据质量**：免费数据有缺失/复权错误，回测前务必校验（清单见 [DATA_SOURCES.md §10](./docs/DATA_SOURCES.md)）
-
-### 风险声明
-> 程序化交易可能因网络延迟、API 限流、行情异常、策略缺陷等因素造成超出预期的损失。实盘前请充分评估，仅使用可承受亏损的资金。本系统不构成任何投资建议。
+> **先记住项目边界：** 仓库里既有一个通用量化交易框架骨架，也有一个更具体的 BTC/USDT 现货—永续 Carry 研究原型。当前工作台可以读取已审计的 Binance 历史数据并回测有限的策略模板；它不会连接交易账户、盯实时盘或发送订单。
+
+## 1. 本项目目前是什么
+
+可以把仓库理解为三条相关但不同的学习路径：
+
+| 部分 | 主要用途 | 当前能做什么 | 当前不能做什么 |
+| --- | --- | --- | --- |
+| 通用量化框架 | 展示常见量化研究结构 | 均线、动量、布林带等演示；历史回测；模拟 Broker | 不能因为目录里出现“券商 API”就认为已接好实盘 |
+| 加密资产研究 | 研究 BTC 现货多头 + 永续空头的 Carry | 获取 Binance 公共历史数据；审计数据；模拟双腿账本；比较有限策略 | 不支持任意币种/任意策略；不连私有账户接口 |
+| 工作台与研究工具 | 看结果、验证代码、学习方法 | Streamlit 表单实验；冻结研究回放；AI 报告和链上事件示例 | 报告/示例不等于实时模型服务或真实链上验证 |
+
+**适合初学者的理解方式：** 先把 BTC 研究路径跑通，再把通用量化框架当作另一套教学示例，最后读 AI、链上和测试目录。不要把架构方向理解为已经交付的生产功能。
+
+## 2. 一次 BTC 历史实验是怎么工作的
+
+~~~mermaid
+flowchart LR
+    A[Binance 公共历史接口] --> B[下载 BTC 现货、永续、标记价和资金费]
+    B --> C[Parquet 快照 + manifest + 哈希审计]
+    C --> D[选择受支持的 Carry 策略]
+    D --> E[生成带时间戳的模拟事件]
+    E --> F[Decimal 双腿账本]
+    F --> G[收益、回撤、归因和风险情景]
+    G --> H[本地 JSON、CSV 和 Streamlit 图表]
+~~~
+
+通用框架是并列的另一条演示路径：
+
+~~~text
+示例或行情数据 → 技术指标 → 通用策略 → 向量化回测 → 图表与绩效摘要
+~~~
+
+### BTC Carry 策略模板
+
+工作台首版只提供这三种模板：
+
+- **现金基准（cash_zero）**：一直持有初始现金，用来和 Carry 策略比较。
+- **固定 Carry（carry_static）**：在 development 区间开始时买入 BTC 现货，同时做空等量 BTC 永续；区间末平仓。
+- **资金费率过滤 Carry（funding_filter）**：只在最新一笔**已结算**资金费率高于你设定的门槛时持有对冲仓位；信号出现后，最早在之后可交易的小时开盘执行。
+
+第一版是有限规则表单。它不会解析自然语言、执行你粘贴的 Python，也不会自动寻找“最佳策略”。
+
+## 3. 初学者术语表
+
+| 术语 | 用简单的话理解 |
+| --- | --- |
+| 现货（spot） | 直接持有 BTC。BTC 下跌时，现货会产生价格亏损。 |
+| 永续合约（perpetual / perp） | 没有到期日的合约；本项目研究的是线性 BTC/USDT 永续。永续仓位会有价格盈亏和资金费。 |
+| 做多 / 做空 | 做多希望价格上涨；做空希望价格下跌。固定 Carry 同时做多现货、做空永续，想降低方向性 BTC 敞口。 |
+| 资金费率（funding rate） | 永续多空双方定期交换的费用。费率为正时通常由多头付给空头；费率为负时方向相反。账本按数据中的实际结算事件记账。 |
+| Carry | 同时持有相关资产和对冲仓位，研究持仓期间产生的资金费、价差变化和成本。Carry 不等于无风险套利。 |
+| 名义金额 | 按市场价格计算的仓位规模。工作台的“权益投入比例”用初始权益估算每条腿的名义金额。 |
+| 抵押比例 | 永续腿账本中的初始抵押假设。它不是 Binance 当时或当前的保证金规则。 |
+| 基点（bps） | 百分比单位：1 基点 = 0.01%。表单中的费率门槛按“每次资金费结算”填写；例如 1 基点对应 0.01%。 |
+| 滑点 | 预期参考价与假设成交价之间的差额。当前回测使用固定的研究假设，无法还原订单簿深度。 |
+| development | 开发研究区间。允许在这里做初步试验，但结果不能视为独立验证。 |
+| validation | 验证区间。用于比较候选方法；不应反复调参直到它表现最好。 |
+| holdout | 最终留出区间。正式研究中应尽量只在方案冻结后评估一次。 |
+| manifest | 数据快照的目录和审计记录，包含时间范围、来源、表文件哈希等。它帮助确认回测使用的是哪份数据。 |
+
+## 4. Windows 初次安装
+
+项目的加密研究和工作台使用单独的 Python 3.12 环境。以下命令在 PowerShell 中从项目根目录运行；不需要激活虚拟环境。
+
+~~~powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install uv
+.\.venv\Scripts\uv.exe pip install --python .venv\Scripts\python.exe --requirement requirements-crypto-ui.lock --require-hashes
+~~~
+
+锁文件同时安装加密研究与 Streamlit 工作台所需依赖。安装失败时先检查 Python 是否为 3.12、网络是否能访问包仓库，以及项目根目录是否正确。
+
+## 5. 准备历史数据
+
+BTC 实验不会偷偷用模拟行情顶替真实数据。它需要一份本机存在并通过审计的 Binance 公共数据快照。
+
+如果你还没有本地快照，在项目根目录运行：
+
+~~~powershell
+.\.venv\Scripts\python.exe -m crypto.cli --config crypto/config.btc-carry-v3.json --collect
+~~~
+
+采集器请求 BTC/USDT 现货小时线、线性永续小时线、永续标记价格小时线和历史资金费。它只读取公开市场数据，不需要 API key，不会访问账户、下单或使用杠杆接口。采集结果默认位于 data_cache/crypto/；manifest 和各表哈希会被审计。
+
+如果你已经有 manifest 且状态为 audited，可以跳过采集。只有 manifest、数据范围和表哈希都通过检查，回测才会继续。未说明的数据缺口会导致审计失败，不会自动补造价格。
+
+更详细的数据字段、时间边界和已知缺口见 [加密数据说明](docs/crypto/DATA.md)。
+
+## 6. 打开策略实验工作台
+
+~~~powershell
+.\.venv\Scripts\python.exe -m streamlit run crypto/ui/app.py --server.address 127.0.0.1 --server.port 8501
+~~~
+
+打开浏览器访问 [http://127.0.0.1:8501](http://127.0.0.1:8501)。
+
+工作台包括四个页面：
+
+1. **策略实验**：填写策略模板和数值参数，点“运行一次开发阶段回测”后才会执行。
+2. **历史回放**：读取本机已经保存并通过一致性检查的冻结研究结果；新克隆的仓库通常没有这些被忽略的文件。
+3. **AI 研究报告**：显示本地保存的报告。这个页面本身不会请求在线大模型。
+4. **链上验证**：显示本地保存的链上事件示例。合成夹具会标成合成数据，不会冒充真实链上证据。
+
+### 表单参数怎么填
+
+- **初始权益中用于 Carry 的比例**：单项范围为 0.1%–50%。例如 25% 表示每条对冲腿都按初始权益的 25% 估算名义规模。
+- **永续腿抵押比例**：单项范围为 0.1–2.0 倍，是账本假设，不是交易所风险规则。两个参数会一起校验：按现货与永续价格接近估算，仓位名义金额与抵押合计最多占初始权益的 95%，至少保留 5% 余量；实际价格基差变化较大时，回测压力场景仍可能提示资金不足。
+- **资金费率触发门槛**：只对 funding_filter 显示，允许 −1000 到 1000 基点/次结算。费率在结算后才被策略看见；回测不会提前使用它。
+
+每次表单回测只使用时间顺序切分里的 development 区间，输出标记为 development_only，并写入 results/crypto/playground/ 的独立子目录。它不会更改正式 campaign、validation 或一次性 holdout，也不会发出交易订单。重新选择策略或日期不会自动运行回测。
+
+## 7. 怎样读一份结果
+
+| 页面指标 | 读法 | 注意事项 |
+| --- | --- | --- |
+| 总收益 | 区间期末权益相对初始权益的变化 | 是历史记账结果，不是未来预期 |
+| 最大回撤 | 按日收盘权益观察到的峰值到谷值跌幅 | 小时内发生的更深回撤可能被漏掉 |
+| CAGR | 把实际区间收益折算成年化 | 区间不足一年时数值不稳定 |
+| 日 Sharpe | 日收益相对波动的年化比值 | 需要足够多的日样本；未定义时不代表零风险 |
+| 收益来源 | 拆分现货盈亏、永续盈亏、资金费、费用和滑点 | 有正资金费，也可能被价格变化和交易成本抵消 |
+| 风险情景 | 按声明的假设模拟价格变化与抵押压力 | 不是历史强平回放，也不是交易所清算价格 |
+
+工作台同时保留 UTC 日期、数据快照编号、策略参数、研究限制，并允许下载 trial JSON 和事件账本 CSV。若要读懂 CSV 的每一列，请看 [双腿账本说明](docs/crypto/LEDGER.md)；工作台字段和图表解释见 [工作台指南](docs/crypto/WORKBENCH.md)。
+
+## 8. 还可以怎样运行和验证项目
+
+### 运行通用量化框架演示
+
+这条路径与 BTC Carry 实验分开。它演示通用策略和回测引擎，某些数据不可用时会使用人工生成的 GBM 样例行情。不要把样例结果当真实市场研究。
+
+建议使用另一个虚拟环境，避免与 Python 3.12 加密依赖混用：
+
+~~~powershell
+py -3.12 -m venv .venv-legacy
+.\.venv-legacy\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv-legacy\Scripts\python.exe main.py
+~~~
+
+入口在 main.py；双均线、动量、布林带策略分别位于 strategy/。模拟 Broker 位于 execution/，不会发真实订单。
+
+### 运行工程验证
+
+在加密环境中从项目根目录运行：
+
+~~~powershell
+.\.venv\Scripts\python.exe -X utf8 -B -m harness.validate
+~~~
+
+这会运行离线工程测试，不请求行情、不触碰交易账户。它检查策略信号、回测边界、风险输入和研究运行约束。完整约定见 [Harness 指南](docs/HARNESS.md)。
+
+注意：crypto.cli 不带 --collect 时只检查已有快照 manifest；它本身不启动策略回测。交互回测从 Streamlit 的“策略实验”页面运行。
+
+## 9. 代码目录地图
+
+~~~text
+main.py                  通用量化框架的演示入口
+config/                  通用框架配置
+data/                    通用框架数据加载与缓存
+indicators/              技术指标
+strategy/                通用框架策略
+backtest/                通用框架回测引擎
+risk/                    通用框架风险规则示例
+execution/               模拟 Broker 与抽象接口
+
+crypto/
+  cli.py                 Binance 数据采集/manifest 检查入口
+  config.py              BTC 研究配置校验
+  data.py                公开数据采集、标准化与数据审计
+  playground.py           隔离的 development-only 策略回测
+  research.py             固定 Carry 策略、事件生成和正式研究流程
+  ledger.py               Decimal 双腿事件账本
+  metrics.py              日收益、回撤和年化指标
+  risk.py                 抵押与压力情景分析
+  ui/
+    app.py                Streamlit 工作台页面和历史回放
+    playground_tab.py     BTC 策略实验表单与结果展示
+    view_model.py         已保存研究结果的图表模型
+
+onchain/                  链上事件解析和安全检查
+report/                   通用框架绩效图表
+harness/                  离线代码验证和受限开发实验
+tests/                    自动化测试与手算账本样例
+docs/                     数据、账本、工作台和研究流程的进阶说明
+data_cache/               本地行情缓存（不随 Git 提交）
+results/                  本地回测结果和报告（不随 Git 提交）
+~~~
+
+## 10. 研究边界与风险
+
+请把当前项目看作研究原型和学习材料：
+
+- UI 是本地历史工作台，不是实时盯盘终端；没有私有 API、账户同步、持仓管理或自动交易。
+- 首版表单只有 BTC/USDT 的三种 Carry 基线；没有任意代码执行、自然语言策略生成、多币种或跨市场策略。
+- 回测结果只使用小时线和已结算资金费。小时线不能还原订单簿深度、双腿同步成交或盘中强平。
+- 部分资金费结算标记价使用同一小时标记价开盘代理值；来源会被标记，但它不是精确结算价。
+- 抵押比例、维护保证金和退出成本是明确的研究假设，不代表 Binance 当前或历史规则。
+- 本地 results/ 和 data_cache/ 不随公开仓库提交。新克隆后需要准备本地数据；冻结结果、AI 报告和链上示例也只有在本地 artifact 存在时才会显示。
+- 正收益不等于策略可执行。需要进一步检查成本、保证金、样本长度、样本外表现和市场冲击；项目结果不构成投资建议。
+
+正式数据契约、策略筛选和留出集边界见 [BTC Carry 研究协议](docs/crypto/RESEARCH_PROTOCOL.md)。总体实现状态见 [Harness 指南](docs/HARNESS.md)，项目目标和阶段见 [产品简报](docs/crypto/PRODUCT_BRIEF.md)。
+
+## 11. 推荐学习顺序
+
+1. 跟着第 4–6 节安装项目、准备数据并运行一次策略实验。
+2. 对照第 3 节理解现货、永续、资金费和 development-only。
+3. 读 [双腿账本](docs/crypto/LEDGER.md)，理解每笔模拟事件如何改变现金、仓位与权益。
+4. 读 [研究协议](docs/crypto/RESEARCH_PROTOCOL.md)，理解时间切分、验证和 holdout。
+5. 最后读 [数据说明](docs/crypto/DATA.md)、[风险模型](docs/crypto/RISK_MODEL.md)、[AI 边界](docs/crypto/AI_BOUNDARIES.md) 和 [链上环境说明](docs/crypto/ONCHAIN_SETUP.md)。
+
+读完 README 后，你应该能够独立运行本机 BTC Carry 历史实验，并准确说明它没有验证什么。更深入的字段语义和研究契约放在上述专题文档里，避免只靠一篇 README 维护两份互相矛盾的细节。
